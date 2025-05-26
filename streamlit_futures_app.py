@@ -577,7 +577,7 @@ def create_summary_charts(results_df, inventory_trends):
             textinfo='label+percent'
         )])
         fig_pie.update_layout(title="库存趋势分布")
-        st.plotly_chart(fig_pie, use_container_width=True)
+        st.plotly_chart(fig_pie, use_container_width=True, key="summary_pie_chart")
     
     with col2:
         # 信号强度分布
@@ -588,7 +588,7 @@ def create_summary_charts(results_df, inventory_trends):
             title='信号强度分布',
             color_discrete_sequence=['skyblue']
         )
-        st.plotly_chart(fig_hist, use_container_width=True)
+        st.plotly_chart(fig_hist, use_container_width=True, key="summary_hist_chart")
 
 def main():
     st.title("📊 期货库存分析系统")
@@ -758,7 +758,8 @@ def main():
         # 筛选选项
         trend_filter = st.selectbox(
             "筛选趋势类型",
-            ["全部", "累库", "去库", "稳定"]
+            ["全部", "累库", "去库", "稳定"],
+            key="trend_filter_selectbox"
         )
         
         if trend_filter != "全部":
@@ -790,13 +791,14 @@ def main():
             chart_type = st.radio(
                 "选择图表类型",
                 ["库存走势图", "库存价格对比图"],
-                horizontal=True
+                horizontal=True,
+                key="chart_type_radio"
             )
             
             if chart_type == "库存走势图":
                 # 创建库存趋势图
                 fig = create_plotly_trend_chart(df, symbol, analysis_result)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key=f"trend_chart_{symbol}")
             else:
                 # 创建库存价格对比图
                 with st.spinner(f"正在获取{symbol}的价格数据..."):
@@ -808,14 +810,14 @@ def main():
                     
                     # 创建库存价格对比图
                     fig = create_plotly_inventory_price_chart(aligned_inventory, aligned_price, symbol, analysis_result)
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key=f"single_price_chart_{symbol}")
                     
                     # 显示数据对齐信息
                     st.info(f"数据时间范围: {aligned_inventory['日期'].min().date()} 到 {aligned_inventory['日期'].max().date()}")
                 else:
                     st.warning(f"无法获取{symbol}的价格数据，显示库存走势图")
                     fig = create_plotly_trend_chart(df, symbol, analysis_result)
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key=f"fallback_trend_chart_{symbol}")
             
             # 关键指标
             col1, col2, col3 = st.columns(3)
@@ -894,7 +896,7 @@ def main():
                                     
                                     # 创建库存价格对比图
                                     fig = create_plotly_inventory_price_chart(aligned_inventory, aligned_price, symbol, analysis_result)
-                                    st.plotly_chart(fig, use_container_width=True)
+                                    st.plotly_chart(fig, use_container_width=True, key=f"price_chart_{symbol}")
                                     
                                     # 显示关键指标
                                     col1, col2, col3, col4 = st.columns(4)
