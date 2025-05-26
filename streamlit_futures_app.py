@@ -14,6 +14,12 @@ import io
 import base64
 from typing import Dict, List, Tuple, Optional
 import time
+import zipfile
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.chart import LineChart, Reference
+import tempfile
+import os
 
 warnings.filterwarnings('ignore')
 
@@ -590,6 +596,281 @@ def create_summary_charts(results_df, inventory_trends):
         )
         st.plotly_chart(fig_hist, use_container_width=True, key=f"summary_hist_chart_{hash(str(len(results_df))) % 1000}")
 
+def create_excel_report(results_df, inventory_trends, data_dict):
+    """创建Excel格式的分析报告"""
+    # 创建工作簿
+    wb = Workbook()
+    
+    # 删除默认工作表
+    wb.remove(wb.active)
+    
+    # 1. 创建汇总分析工作表
+    ws_summary = wb.create_sheet("汇总分析")
+    
+    # 设置标题
+    ws_summary['A1'] = "期货库存分析报告"
+    ws_summary['A1'].font = Font(size=16, bold=True)
+    ws_summary['A1'].alignment = Alignment(horizontal='center')
+    ws_summary.merge_cells('A1:H1')
+    
+    # 分析时间
+    ws_summary['A3'] = f"分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    ws_summary['A3'].font = Font(bold=True)
+    
+    # 汇总统计
+    ws_summary['A5'] = "汇总统计"
+    ws_summary['A5'].font = Font(size=14, bold=True)
+    
+    summary_data = [
+        ["指标", "数量", "占比"],
+        ["总品种数", len(results_df), "100%"],
+        ["累库品种", len(inventory_trends['累库品种']), f"{len(inventory_trends['累库品种'])/len(results_df)*100:.1f}%"],
+        ["去库品种", len(inventory_trends['去库品种']), f"{len(inventory_trends['去库品种'])/len(results_df)*100:.1f}%"],
+        ["稳定品种", len(inventory_trends['库存稳定品种']), f"{len(inventory_trends['库存稳定品种'])/len(results_df)*100:.1f}%"]
+    ]
+    
+    for row_idx, row_data in enumerate(summary_data, start=6):
+        for col_idx, value in enumerate(row_data, start=1):
+            cell = ws_summary.cell(row=row_idx, column=col_idx, value=value)
+            if row_idx == 6:  # 标题行
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
+    
+    # 2. 创建详细分析结果工作表
+    ws_details = wb.create_sheet("详细分析结果")
+    
+    # 写入列标题
+    headers = list(results_df.columns)
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws_details.cell(row=1, column=col_idx, value=header)
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
+    
+    # 写入数据
+    for row_idx, (_, row) in enumerate(results_df.iterrows(), start=2):
+        for col_idx, value in enumerate(row, start=1):
+            ws_details.cell(row=row_idx, column=col_idx, value=value)
+    
+    # 3. 创建重点品种工作表
+    if inventory_trends['累库品种'] or inventory_trends['去库品种']:
+        ws_focus = wb.create_sheet("重点关注品种")
+        
+        current_row = 1
+        
+        # 累库品种
+        if inventory_trends['累库品种']:
+            ws_focus.cell(row=current_row, column=1, value="累库品种 TOP10").font = Font(size=14, bold=True)
+            current_row += 1
+            
+            # 标题行
+            headers = ["品种", "变化率(%)", "信号强度", "趋势强度", "分类"]
+            for col_idx, header in enumerate(headers, start=1):
+                cell = ws_focus.cell(row=current_row, column=col_idx, value=header)
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
+            current_row += 1
+            
+            # 数据行
+            top_accumulation = results_df[results_df['趋势'] == '累库'].head(10)
+            for _, row in top_accumulation.iterrows():
+                ws_focus.cell(row=current_row, column=1, value=row['品种'])
+                ws_focus.cell(row=current_row, column=2, value=f"{row['变化率']:.2f}")
+                ws_focus.cell(row=current_row, column=3, value=f"{row['信号强度']:.3f}")
+                ws_focus.cell(row=current_row, column=4, value=f"{row['趋势强度']:.3f}")
+                ws_focus.cell(row=current_row, column=5, value=row['分类'])
+                current_row += 1
+            
+            current_row += 2
+        
+        # 去库品种
+        if inventory_trends['去库品种']:
+            ws_focus.cell(row=current_row, column=1, value="去库品种 TOP10").font = Font(size=14, bold=True)
+            current_row += 1
+            
+            # 标题行
+            headers = ["品种", "变化率(%)", "信号强度", "趋势强度", "分类"]
+            for col_idx, header in enumerate(headers, start=1):
+                cell = ws_focus.cell(row=current_row, column=col_idx, value=header)
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="FFB6C1", end_color="FFB6C1", fill_type="solid")
+            current_row += 1
+            
+            # 数据行
+            top_depletion = results_df[results_df['趋势'] == '去库'].head(10)
+            for _, row in top_depletion.iterrows():
+                ws_focus.cell(row=current_row, column=1, value=row['品种'])
+                ws_focus.cell(row=current_row, column=2, value=f"{row['变化率']:.2f}")
+                ws_focus.cell(row=current_row, column=3, value=f"{row['信号强度']:.3f}")
+                ws_focus.cell(row=current_row, column=4, value=f"{row['趋势强度']:.3f}")
+                ws_focus.cell(row=current_row, column=5, value=row['分类'])
+                current_row += 1
+    
+    # 4. 创建原始数据工作表（选择性添加）
+    if len(data_dict) <= 10:  # 只有在品种数量不太多时才添加原始数据
+        for symbol, df in list(data_dict.items())[:5]:  # 最多添加5个品种的原始数据
+            ws_data = wb.create_sheet(f"{symbol}_原始数据")
+            
+            # 写入列标题
+            headers = list(df.columns)
+            for col_idx, header in enumerate(headers, start=1):
+                cell = ws_data.cell(row=1, column=col_idx, value=header)
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
+            
+            # 写入数据（最近100条记录）
+            recent_data = df.tail(100)
+            for row_idx, (_, row) in enumerate(recent_data.iterrows(), start=2):
+                for col_idx, value in enumerate(row, start=1):
+                    if isinstance(value, pd.Timestamp):
+                        value = value.strftime('%Y-%m-%d')
+                    ws_data.cell(row=row_idx, column=col_idx, value=value)
+    
+    # 调整列宽
+    for ws in wb.worksheets:
+        for column in ws.columns:
+            max_length = 0
+            column_letter = None
+            for cell in column:
+                try:
+                    # 跳过合并单元格
+                    if hasattr(cell, 'column_letter'):
+                        column_letter = cell.column_letter
+                    elif hasattr(cell, 'column'):
+                        from openpyxl.utils import get_column_letter
+                        column_letter = get_column_letter(cell.column)
+                    
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            
+            if column_letter:
+                adjusted_width = min(max_length + 2, 20)
+                ws.column_dimensions[column_letter].width = adjusted_width
+    
+    return wb
+
+def create_charts_zip(results_df, inventory_trends, data_dict):
+    """创建包含所有图表的ZIP文件"""
+    try:
+        # 创建临时目录
+        with tempfile.TemporaryDirectory() as temp_dir:
+            chart_files = []
+            
+            # 1. 创建汇总图表
+            try:
+                # 趋势分布饼图
+                trend_counts = [
+                    len(inventory_trends['累库品种']),
+                    len(inventory_trends['去库品种']),
+                    len(inventory_trends['库存稳定品种'])
+                ]
+                labels = ['累库品种', '去库品种', '稳定品种']
+                colors = ['green', 'red', 'gray']
+                
+                fig_pie = go.Figure(data=[go.Pie(
+                    labels=labels,
+                    values=trend_counts,
+                    marker_colors=colors,
+                    textinfo='label+percent'
+                )])
+                fig_pie.update_layout(title="库存趋势分布", width=800, height=600)
+                
+                pie_path = os.path.join(temp_dir, "01_库存趋势分布.png")
+                fig_pie.write_image(pie_path)
+                chart_files.append(pie_path)
+            except Exception as e:
+                print(f"创建趋势分布图失败: {e}")
+            
+            try:
+                # 信号强度分布直方图
+                fig_hist = px.histogram(
+                    results_df,
+                    x='信号强度',
+                    nbins=20,
+                    title='信号强度分布',
+                    color_discrete_sequence=['skyblue']
+                )
+                fig_hist.update_layout(width=800, height=600)
+                
+                hist_path = os.path.join(temp_dir, "02_信号强度分布.png")
+                fig_hist.write_image(hist_path)
+                chart_files.append(hist_path)
+            except Exception as e:
+                print(f"创建信号强度分布图失败: {e}")
+            
+            # 2. 创建重点品种图表
+            chart_count = 3
+            
+            # 累库品种图表
+            if inventory_trends['累库品种']:
+                top_accumulation = results_df[results_df['趋势'] == '累库'].head(5)
+                for _, row in top_accumulation.iterrows():
+                    try:
+                        symbol = row['品种']
+                        if symbol in data_dict:
+                            df = data_dict[symbol]
+                            analysis_result = row.to_dict()
+                            
+                            # 创建库存趋势图
+                            fig = create_plotly_trend_chart(df, symbol, analysis_result)
+                            fig.update_layout(width=1000, height=700)
+                            
+                            chart_path = os.path.join(temp_dir, f"{chart_count:02d}_{symbol}_累库趋势图.png")
+                            fig.write_image(chart_path)
+                            chart_files.append(chart_path)
+                            chart_count += 1
+                    except Exception as e:
+                        print(f"创建{symbol}累库趋势图失败: {e}")
+            
+            # 去库品种图表
+            if inventory_trends['去库品种']:
+                top_depletion = results_df[results_df['趋势'] == '去库'].head(5)
+                for _, row in top_depletion.iterrows():
+                    try:
+                        symbol = row['品种']
+                        if symbol in data_dict:
+                            df = data_dict[symbol]
+                            analysis_result = row.to_dict()
+                            
+                            # 创建库存趋势图
+                            fig = create_plotly_trend_chart(df, symbol, analysis_result)
+                            fig.update_layout(width=1000, height=700)
+                            
+                            chart_path = os.path.join(temp_dir, f"{chart_count:02d}_{symbol}_去库趋势图.png")
+                            fig.write_image(chart_path)
+                            chart_files.append(chart_path)
+                            chart_count += 1
+                    except Exception as e:
+                        print(f"创建{symbol}去库趋势图失败: {e}")
+            
+            # 创建ZIP文件
+            if chart_files:  # 只有在有图表文件时才创建ZIP
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    for chart_file in chart_files:
+                        if os.path.exists(chart_file):
+                            zip_file.write(chart_file, os.path.basename(chart_file))
+                
+                zip_buffer.seek(0)
+                return zip_buffer.getvalue()
+            else:
+                # 如果没有图表文件，创建一个包含说明的ZIP
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    zip_file.writestr("说明.txt", "图表生成失败，请检查数据和环境配置。")
+                zip_buffer.seek(0)
+                return zip_buffer.getvalue()
+                
+    except Exception as e:
+        print(f"创建图表ZIP包失败: {e}")
+        # 返回一个包含错误信息的ZIP文件
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            zip_file.writestr("错误信息.txt", f"图表包生成失败: {str(e)}")
+        zip_buffer.seek(0)
+        return zip_buffer.getvalue()
+
 def main():
     st.title("📊 期货库存分析系统")
     st.markdown("---")
@@ -920,13 +1201,61 @@ def main():
         
         # 下载结果
         st.subheader("💾 下载结果")
-        csv = results_df.to_csv(index=False, encoding='utf-8-sig')
-        st.download_button(
-            label="下载分析结果 (CSV)",
-            data=csv,
-            file_name=f"期货库存分析结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            # CSV下载
+            csv = results_df.to_csv(index=False, encoding='utf-8-sig')
+            st.download_button(
+                label="📄 下载分析结果 (CSV)",
+                data=csv,
+                file_name=f"期货库存分析结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+        
+        with col2:
+            # Excel下载
+            try:
+                with st.spinner("正在生成Excel报告..."):
+                    wb = create_excel_report(results_df, inventory_trends, data_dict)
+                    excel_buffer = io.BytesIO()
+                    wb.save(excel_buffer)
+                    excel_buffer.seek(0)
+                
+                st.download_button(
+                    label="📊 下载Excel报告",
+                    data=excel_buffer.getvalue(),
+                    file_name=f"期货库存分析报告_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            except Exception as e:
+                st.error(f"生成Excel报告失败: {str(e)}")
+                st.info("请确保已安装 openpyxl 库: pip install openpyxl")
+        
+        with col3:
+            # 图表下载
+            try:
+                with st.spinner("正在生成图表包..."):
+                    charts_zip = create_charts_zip(results_df, inventory_trends, data_dict)
+                
+                st.download_button(
+                    label="📈 下载图表包 (ZIP)",
+                    data=charts_zip,
+                    file_name=f"期货库存分析图表_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                    mime="application/zip"
+                )
+            except Exception as e:
+                st.error(f"生成图表包失败: {str(e)}")
+                st.info("请确保已安装 kaleido 库: pip install kaleido")
+        
+        # 下载说明
+        st.info("""
+        📋 **下载说明：**
+        - **CSV文件**: 包含所有分析结果的原始数据，适合进一步数据处理
+        - **Excel报告**: 包含格式化的分析报告，包括汇总统计、详细结果、重点品种和部分原始数据
+        - **图表包**: 包含所有重要图表的PNG文件，包括汇总图表和重点品种趋势图
+        """)
 
 if __name__ == "__main__":
     main() 
