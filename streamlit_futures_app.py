@@ -594,6 +594,22 @@ def main():
     st.title("📊 期货库存分析系统")
     st.markdown("---")
     
+    # 显示使用说明
+    if not st.session_state.get('analysis_completed', False):
+        st.info("👈 请在左侧配置分析参数，然后点击'开始分析'按钮开始分析。分析完成后，您可以在信号品种对比分析中自由选择品种，页面不会重新加载。")
+    
+    # 初始化session state
+    if 'analysis_completed' not in st.session_state:
+        st.session_state.analysis_completed = False
+    if 'results_df' not in st.session_state:
+        st.session_state.results_df = None
+    if 'data_dict' not in st.session_state:
+        st.session_state.data_dict = None
+    if 'inventory_trends' not in st.session_state:
+        st.session_state.inventory_trends = None
+    if 'analysis_mode' not in st.session_state:
+        st.session_state.analysis_mode = "全品种分析"
+    
     # 侧边栏配置
     st.sidebar.header("分析配置")
     
@@ -611,7 +627,8 @@ def main():
     
     analysis_mode = st.sidebar.radio(
         "选择分析模式",
-        ["全品种分析", "自定义品种分析", "单品种详细分析"]
+        ["全品种分析", "自定义品种分析", "单品种详细分析"],
+        key="analysis_mode_radio"
     )
     
     if analysis_mode == "全品种分析":
@@ -620,67 +637,99 @@ def main():
         selected_symbols = st.sidebar.multiselect(
             "选择要分析的品种",
             all_symbols,
-            default=all_symbols[:10]
+            default=all_symbols[:10],
+            key="custom_symbols_select"
         )
     else:  # 单品种详细分析
-        selected_symbols = [st.sidebar.selectbox("选择品种", all_symbols)]
+        selected_symbols = [st.sidebar.selectbox("选择品种", all_symbols, key="single_symbol_select")]
     
     # 分析参数
     st.sidebar.subheader("分析参数")
-    confidence_level = st.sidebar.slider("置信水平", 0.90, 0.99, 0.95, 0.01)
-    change_threshold = st.sidebar.slider("变化率阈值 (%)", 5, 20, 10, 1)
-    trend_threshold = st.sidebar.slider("趋势强度阈值", 0.1, 0.8, 0.3, 0.1)
+    confidence_level = st.sidebar.slider("置信水平", 0.90, 0.99, 0.95, 0.01, key="confidence_slider")
+    change_threshold = st.sidebar.slider("变化率阈值 (%)", 5, 20, 10, 1, key="change_threshold_slider")
+    trend_threshold = st.sidebar.slider("趋势强度阈值", 0.1, 0.8, 0.3, 0.1, key="trend_threshold_slider")
+    
+    # 重置分析按钮
+    if st.sidebar.button("🔄 重新分析", type="secondary"):
+        # 清理所有分析相关的session state
+        keys_to_clear = [key for key in st.session_state.keys() if 
+                        key.startswith(('analysis_', 'results_', 'data_', 'inventory_', 'selected_', 'price_data_'))]
+        for key in keys_to_clear:
+            del st.session_state[key]
+        st.session_state.analysis_completed = False
+        st.rerun()
     
     # 开始分析按钮
-    if st.sidebar.button("🚀 开始分析", type="primary"):
+    start_analysis = st.sidebar.button("🚀 开始分析", type="primary")
+    
+    if start_analysis or st.session_state.analysis_completed:
         if not selected_symbols:
             st.error("请至少选择一个品种进行分析！")
             return
         
-        st.info(f"正在分析 {len(selected_symbols)} 个品种...")
-        
-        # 获取数据
-        data_dict = get_futures_inventory_data(selected_symbols)
-        
-        if not data_dict:
-            st.error("未获取到任何有效数据，请检查网络连接或稍后重试。")
-            return
-        
-        st.success(f"成功获取 {len(data_dict)} 个品种的数据")
-        
-        # 分析数据
-        analyzer = FuturesInventoryAnalyzer(confidence_level)
-        results = []
-        inventory_trends = {'累库品种': [], '去库品种': [], '库存稳定品种': []}
-        
-        for symbol, df in data_dict.items():
-            try:
-                category = get_futures_category(symbol)
-                analysis = analyzer.analyze_inventory_trend(df, category)
-                
-                results.append({
-                    '品种': symbol,
-                    '分类': category,
-                    **analysis
-                })
-                
-                trend = analysis['趋势']
-                if trend == '累库':
-                    inventory_trends['累库品种'].append(symbol)
-                elif trend == '去库':
-                    inventory_trends['去库品种'].append(symbol)
-                else:
-                    inventory_trends['库存稳定品种'].append(symbol)
+        # 如果是新的分析请求，执行分析
+        if start_analysis and not st.session_state.analysis_completed:
+            st.info(f"正在分析 {len(selected_symbols)} 个品种...")
+            
+            # 获取数据
+            data_dict = get_futures_inventory_data(selected_symbols)
+            
+            if not data_dict:
+                st.error("未获取到任何有效数据，请检查网络连接或稍后重试。")
+                return
+            
+            st.success(f"成功获取 {len(data_dict)} 个品种的数据")
+            
+            # 分析数据
+            analyzer = FuturesInventoryAnalyzer(confidence_level)
+            results = []
+            inventory_trends = {'累库品种': [], '去库品种': [], '库存稳定品种': []}
+            
+            for symbol, df in data_dict.items():
+                try:
+                    category = get_futures_category(symbol)
+                    analysis = analyzer.analyze_inventory_trend(df, category)
                     
-            except Exception as e:
-                st.warning(f"分析 {symbol} 时出错: {str(e)}")
+                    results.append({
+                        '品种': symbol,
+                        '分类': category,
+                        **analysis
+                    })
+                    
+                    trend = analysis['趋势']
+                    if trend == '累库':
+                        inventory_trends['累库品种'].append(symbol)
+                    elif trend == '去库':
+                        inventory_trends['去库品种'].append(symbol)
+                    else:
+                        inventory_trends['库存稳定品种'].append(symbol)
+                        
+                except Exception as e:
+                    st.warning(f"分析 {symbol} 时出错: {str(e)}")
+            
+            if not results:
+                st.error("分析失败，未生成任何结果。")
+                return
+            
+            results_df = pd.DataFrame(results)
+            results_df = results_df.sort_values('信号强度', ascending=False)
+            
+            # 保存到session state
+            st.session_state.results_df = results_df
+            st.session_state.data_dict = data_dict
+            st.session_state.inventory_trends = inventory_trends
+            st.session_state.analysis_completed = True
+            st.session_state.analysis_mode = analysis_mode
         
-        if not results:
-            st.error("分析失败，未生成任何结果。")
+        # 从session state获取数据
+        results_df = st.session_state.results_df
+        data_dict = st.session_state.data_dict
+        inventory_trends = st.session_state.inventory_trends
+        
+        # 检查数据有效性
+        if results_df is None or data_dict is None or inventory_trends is None:
+            st.error("分析数据丢失，请重新分析。")
             return
-        
-        results_df = pd.DataFrame(results)
-        results_df = results_df.sort_values('信号强度', ascending=False)
         
         # 显示结果
         st.header("📈 分析结果")
@@ -806,16 +855,29 @@ def main():
             # 选择要分析的信号品种
             signal_symbols = inventory_trends['累库品种'] + inventory_trends['去库品种']
             if signal_symbols:
+                # 使用session state来保存选择状态
+                if 'selected_signal_symbols' not in st.session_state:
+                    st.session_state.selected_signal_symbols = signal_symbols[:3] if len(signal_symbols) >= 3 else signal_symbols
+                
                 selected_signal_symbols = st.multiselect(
                     "选择要查看库存价格对比的品种",
                     signal_symbols,
-                    default=signal_symbols[:3] if len(signal_symbols) >= 3 else signal_symbols
+                    default=st.session_state.selected_signal_symbols,
+                    key="signal_symbols_multiselect"
                 )
                 
+                # 更新session state
+                st.session_state.selected_signal_symbols = selected_signal_symbols
+                
                 if selected_signal_symbols:
-                    # 批量获取价格数据
-                    with st.spinner(f"正在批量获取{len(selected_signal_symbols)}个品种的价格数据..."):
-                        price_data_dict = get_multiple_price_data_streamlit(tuple(selected_signal_symbols))
+                    # 使用session state缓存价格数据
+                    price_cache_key = f"price_data_{hash(tuple(sorted(selected_signal_symbols)))}"
+                    if price_cache_key not in st.session_state:
+                        # 批量获取价格数据
+                        with st.spinner(f"正在批量获取{len(selected_signal_symbols)}个品种的价格数据..."):
+                            st.session_state[price_cache_key] = get_multiple_price_data_streamlit(tuple(selected_signal_symbols))
+                    
+                    price_data_dict = st.session_state[price_cache_key]
                     
                     for symbol in selected_signal_symbols:
                         if symbol in data_dict:
