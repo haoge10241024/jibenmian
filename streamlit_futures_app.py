@@ -25,6 +25,17 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# 优化缓存配置
+@st.cache_data(ttl=7200, max_entries=1000)  # 缓存2小时，最多1000个条目
+def cached_futures_inventory_em(symbol):
+    """缓存的期货库存数据获取"""
+    return ak.futures_inventory_em(symbol=symbol)
+
+@st.cache_data(ttl=7200, max_entries=1000)  # 缓存2小时，最多1000个条目  
+def cached_futures_hist_em(symbol, period="daily"):
+    """缓存的期货历史行情数据获取"""
+    return ak.futures_hist_em(symbol=symbol, period=period)
+
 # 设置中文字体
 plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
@@ -173,52 +184,79 @@ def get_futures_category(symbol: str) -> str:
             return category
     return '其他'
 
+import concurrent.futures
+
+def get_single_inventory_data_streamlit(symbol: str) -> Optional[pd.DataFrame]:
+    """获取单个期货品种的库存数据（Streamlit版本）"""
+    try:
+        df = cached_futures_inventory_em(symbol)
+        
+        if df is not None and not df.empty and '日期' in df.columns and '库存' in df.columns:
+            df['日期'] = pd.to_datetime(df['日期'])
+            df['库存'] = pd.to_numeric(df['库存'], errors='coerce')
+            df = df.dropna(subset=['日期', '库存'])
+            
+            if len(df) >= 2:
+                df['增减'] = df['库存'].diff()
+                df = df.dropna(subset=['增减'])
+                
+                if len(df) >= 30:
+                    return df
+        return None
+    except Exception:
+        return None
+
 @st.cache_data(ttl=3600)  # 缓存1小时
 def get_futures_inventory_data(symbols_list):
-    """获取期货库存数据"""
+    """并行获取期货库存数据"""
     data_dict = {}
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    for i, symbol in enumerate(symbols_list):
-        try:
-            status_text.text(f"正在获取 {symbol} 的库存数据... ({i+1}/{len(symbols_list)})")
-            df = ak.futures_inventory_em(symbol=symbol)
+    status_text.text(f"开始并行获取 {len(symbols_list)} 个品种的库存数据...")
+    
+    # 使用线程池并行获取数据
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        # 提交所有任务
+        future_to_symbol = {
+            executor.submit(get_single_inventory_data_streamlit, symbol): symbol 
+            for symbol in symbols_list
+        }
+        
+        # 收集结果
+        completed = 0
+        for future in concurrent.futures.as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            completed += 1
             
-            if df is not None and not df.empty and '日期' in df.columns and '库存' in df.columns:
-                df['日期'] = pd.to_datetime(df['日期'])
-                df['库存'] = pd.to_numeric(df['库存'], errors='coerce')
-                df = df.dropna(subset=['日期', '库存'])
-                
-                if len(df) >= 2:
-                    df['增减'] = df['库存'].diff()
-                    df = df.dropna(subset=['增减'])
-                    
-                    if len(df) >= 30:
-                        data_dict[symbol] = df
+            try:
+                df = future.result()
+                if df is not None:
+                    data_dict[symbol] = df
+                    status_text.text(f"✓ {symbol} 数据获取成功 ({completed}/{len(symbols_list)})")
+                else:
+                    status_text.text(f"✗ {symbol} 数据获取失败 ({completed}/{len(symbols_list)})")
+            except Exception:
+                status_text.text(f"✗ {symbol} 处理异常 ({completed}/{len(symbols_list)})")
             
-            progress_bar.progress((i + 1) / len(symbols_list))
-            time.sleep(0.1)  # 避免请求过快
-            
-        except Exception as e:
-            st.warning(f"获取 {symbol} 数据失败: {str(e)}")
-            continue
+            progress_bar.progress(completed / len(symbols_list))
+            time.sleep(0.05)  # 短暂延迟以显示进度
     
     progress_bar.empty()
     status_text.empty()
     return data_dict
 
 @st.cache_data(ttl=3600)  # 缓存1小时
-def get_futures_price_data(symbol: str) -> Optional[pd.DataFrame]:
+def get_futures_price_data_cached(symbol: str) -> Optional[pd.DataFrame]:
     """
-    获取期货价格数据
+    获取期货价格数据（带缓存）
     """
     try:
         # 将库存数据的symbol转换为价格数据的symbol（添加"主连"）
         price_symbol = f"{symbol}主连"
         
         # 获取期货历史行情数据
-        price_df = ak.futures_hist_em(symbol=price_symbol, period="daily")
+        price_df = cached_futures_hist_em(price_symbol, "daily")
         
         if price_df is None or price_df.empty:
             return None
@@ -234,9 +272,61 @@ def get_futures_price_data(symbol: str) -> Optional[pd.DataFrame]:
         
         return price_df
         
-    except Exception as e:
-        st.warning(f"获取 {symbol} 价格数据失败: {str(e)}")
+    except Exception:
         return None
+
+def get_futures_price_data(symbol: str) -> Optional[pd.DataFrame]:
+    """
+    获取期货价格数据
+    """
+    return get_futures_price_data_cached(symbol)
+
+@st.cache_data(ttl=3600)  # 缓存1小时
+def get_multiple_price_data_streamlit(symbols_tuple):
+    """
+    并行获取多个品种的价格数据（Streamlit版本）
+    注意：使用tuple作为参数以支持缓存
+    """
+    symbols = list(symbols_tuple)
+    price_data_dict = {}
+    
+    if not symbols:
+        return price_data_dict
+    
+    # 创建进度显示
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    status_text.text(f"开始并行获取 {len(symbols)} 个品种的价格数据...")
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        # 提交所有任务
+        future_to_symbol = {
+            executor.submit(get_futures_price_data_cached, symbol): symbol 
+            for symbol in symbols
+        }
+        
+        # 收集结果
+        completed = 0
+        for future in concurrent.futures.as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            completed += 1
+            
+            try:
+                price_df = future.result()
+                if price_df is not None:
+                    price_data_dict[symbol] = price_df
+                    status_text.text(f"✓ {symbol}主连 价格数据获取成功 ({completed}/{len(symbols)})")
+                else:
+                    status_text.text(f"✗ {symbol}主连 价格数据获取失败 ({completed}/{len(symbols)})")
+            except Exception:
+                status_text.text(f"✗ {symbol}主连 处理异常 ({completed}/{len(symbols)})")
+            
+            progress_bar.progress(completed / len(symbols))
+            time.sleep(0.05)
+    
+    progress_bar.empty()
+    status_text.empty()
+    return price_data_dict
 
 def align_inventory_and_price_data(inventory_df: pd.DataFrame, price_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -723,14 +813,18 @@ def main():
                 )
                 
                 if selected_signal_symbols:
+                    # 批量获取价格数据
+                    with st.spinner(f"正在批量获取{len(selected_signal_symbols)}个品种的价格数据..."):
+                        price_data_dict = get_multiple_price_data_streamlit(tuple(selected_signal_symbols))
+                    
                     for symbol in selected_signal_symbols:
                         if symbol in data_dict:
                             with st.expander(f"📈 {symbol} 库存价格对比分析", expanded=False):
                                 df = data_dict[symbol]
                                 analysis_result = results_df[results_df['品种'] == symbol].iloc[0].to_dict()
                                 
-                                with st.spinner(f"正在获取{symbol}的价格数据..."):
-                                    price_df = get_futures_price_data(symbol)
+                                # 使用预获取的价格数据
+                                price_df = price_data_dict.get(symbol)
                                 
                                 if price_df is not None:
                                     # 对齐数据时间范围
