@@ -92,13 +92,27 @@ class FuturesInventoryAnalyzer:
             # 优化变化率计算
             start_inventory = recent_data['库存'].iloc[0]
             end_inventory = recent_data['库存'].iloc[-1]
-            if start_inventory > 0:  # 确保起始库存大于0
-                change_rate = (end_inventory - start_inventory) / start_inventory * 100
-            else:
-                change_rate = 0
             
-            # 限制变化率范围
-            change_rate = min(max(change_rate, -100), 100)  # 限制在-100%到100%之间
+            # 更稳健的变化率计算
+            if start_inventory > 0:
+                change_rate = (end_inventory - start_inventory) / start_inventory * 100
+                # 对于极端值进行合理限制
+                if abs(change_rate) > 200:  # 如果变化率超过200%，可能是数据异常
+                    # 使用平均库存作为基准重新计算
+                    avg_inventory = recent_data['库存'].mean()
+                    if avg_inventory > 0:
+                        change_rate = (end_inventory - start_inventory) / avg_inventory * 100
+                    else:
+                        change_rate = 0
+            else:
+                # 起始库存为0时，使用不同的计算方法
+                if end_inventory > 0:
+                    change_rate = 100  # 从0增加到有库存，设为100%
+                else:
+                    change_rate = 0
+            
+            # 限制变化率范围到合理区间
+            change_rate = min(max(change_rate, -150), 150)  # 限制在-150%到150%之间
             
             # 高级指标
             seasonal_factor = self.calculate_seasonal_factor(df, category)
@@ -106,12 +120,19 @@ class FuturesInventoryAnalyzer:
             trend_strength = self.calculate_trend_strength(df)
             dynamic_threshold = self.calculate_dynamic_threshold(df)
             
-            # 趋势判断 - 使用更严格的判断标准
+            # 趋势判断 - 优化判断逻辑
             trend = '稳定'
-            if change_rate > 10 and avg_change > 0 and trend_strength > 0.3:  # 提高阈值到10%，增加趋势强度要求
-                trend = '累库'
-            elif change_rate < -10 and avg_change < 0 and trend_strength > 0.3:  # 提高阈值到10%，增加趋势强度要求
-                trend = '去库'
+            # 主要基于变化率和平均日变化，趋势强度作为辅助判断
+            if abs(change_rate) > 15:  # 变化率超过15%
+                if change_rate > 15 and avg_change > 0:
+                    trend = '累库'
+                elif change_rate < -15 and avg_change < 0:
+                    trend = '去库'
+            elif abs(change_rate) > 8:  # 变化率在8-15%之间，需要趋势强度支持
+                if change_rate > 8 and avg_change > 0 and trend_strength > 0.1:
+                    trend = '累库'
+                elif change_rate < -8 and avg_change < 0 and trend_strength > 0.1:
+                    trend = '去库'
             
             # 信号强度计算
             signal_strength = min(abs(change_rate) / max(dynamic_threshold, 1), 1.0)
@@ -431,17 +452,165 @@ def plot_signal_analysis(data_dict, inventory_trends, results_df):
     """
     为累库和去库品种绘制专业的信号分析图
     """
-    # 创建累库品种分析图
+    print(f"\n开始绘制信号分析图...")
+    print(f"累库品种数量: {len(inventory_trends['累库品种'])}")
+    print(f"去库品种数量: {len(inventory_trends['去库品种'])}")
+    
+    # 创建累库品种库存价格对比分析图
     if inventory_trends['累库品种']:
+        print(f"正在绘制累库品种分析图，品种: {inventory_trends['累库品种']}")
+        plot_category_analysis_with_price(data_dict, inventory_trends['累库品种'], '累库品种', results_df, 'green')
         plot_category_analysis(data_dict, inventory_trends['累库品种'], '累库品种', results_df, 'green')
     
-    # 创建去库品种分析图
+    # 创建去库品种库存价格对比分析图
     if inventory_trends['去库品种']:
+        print(f"正在绘制去库品种分析图，品种: {inventory_trends['去库品种']}")
+        plot_category_analysis_with_price(data_dict, inventory_trends['去库品种'], '去库品种', results_df, 'red')
         plot_category_analysis(data_dict, inventory_trends['去库品种'], '去库品种', results_df, 'red')
+
+def plot_category_analysis_with_price(data_dict, symbols, category_name, results_df, color_theme):
+    """
+    绘制特定类别品种的库存与价格对比分析图
+    """
+    if not symbols:
+        return
+    
+    # 显示所有信号品种，但限制在合理范围内
+    category_results = results_df[results_df['品种'].isin(symbols)].head(9)  # 最多显示9个
+    top_symbols = category_results['品种'].tolist()
+    print(f"  {category_name}将绘制的品种: {top_symbols}")
+    
+    # 计算子图布局
+    n_symbols = len(top_symbols)
+    if n_symbols <= 2:
+        rows, cols = 1, 2
+    elif n_symbols <= 4:
+        rows, cols = 2, 2
+    elif n_symbols <= 6:
+        rows, cols = 2, 3
+    else:
+        rows, cols = 3, 3
+    
+    fig, axes = plt.subplots(rows, cols, figsize=(24, 16))
+    if n_symbols == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten()
+    
+    fig.suptitle(f'{category_name}库存与价格走势对比分析 (按信号强度排序)', fontsize=18, fontweight='bold')
+    
+    for i, symbol in enumerate(top_symbols):
+        if symbol not in data_dict:
+            continue
+            
+        inventory_df = data_dict[symbol]
+        
+        # 获取价格数据
+        price_df = get_futures_price_data(symbol)
+        
+        if price_df is not None:
+            # 对齐数据时间范围
+            aligned_inventory, aligned_price = align_inventory_and_price_data(inventory_df, price_df)
+        else:
+            aligned_inventory = inventory_df
+            aligned_price = None
+        
+        ax = axes[i]
+        
+        # 获取该品种的分析结果
+        symbol_result = category_results[category_results['品种'] == symbol].iloc[0]
+        
+        # 创建双y轴
+        ax2 = ax.twinx()
+        
+        # 绘制库存趋势（左y轴）
+        line1 = ax.plot(aligned_inventory['日期'], aligned_inventory['库存'], 
+                       color=color_theme, linewidth=2.5, alpha=0.8, label='库存')
+        
+        # 添加库存30日移动平均线
+        ma30_inventory = aligned_inventory['库存'].rolling(window=30).mean()
+        ax.plot(aligned_inventory['日期'], ma30_inventory, 
+               color=color_theme, linestyle='--', linewidth=1.5, alpha=0.6, label='库存30日均线')
+        
+        # 绘制价格趋势（右y轴）
+        if aligned_price is not None and len(aligned_price) > 0:
+            line2 = ax2.plot(aligned_price['日期'], aligned_price['价格'], 
+                           color='purple', linewidth=2.5, alpha=0.8, label='价格')
+            
+            # 添加价格30日移动平均线
+            ma30_price = aligned_price['价格'].rolling(window=30).mean()
+            ax2.plot(aligned_price['日期'], ma30_price, 
+                    color='purple', linestyle='--', linewidth=1.5, alpha=0.6, label='价格30日均线')
+            
+            # 计算价格变化率
+            if len(aligned_price) > 1:
+                price_change_rate = (aligned_price['价格'].iloc[-1] - aligned_price['价格'].iloc[0]) / aligned_price['价格'].iloc[0] * 100
+            else:
+                price_change_rate = 0
+        else:
+            price_change_rate = 0
+            ax2.text(0.5, 0.5, '价格数据不可用', transform=ax2.transAxes, 
+                    ha='center', va='center', fontsize=12, color='red')
+        
+        # 标注关键信息
+        change_rate = symbol_result['变化率']
+        signal_strength = symbol_result['信号强度']
+        trend_strength = symbol_result['趋势强度']
+        
+        # 设置标题和标签
+        title_text = f'{symbol}\n库存变化: {change_rate:.1f}% | 价格变化: {price_change_rate:.1f}%\n信号强度: {signal_strength:.2f} | 趋势强度: {trend_strength:.2f}'
+        ax.set_title(title_text, fontsize=11, fontweight='bold')
+        
+        # 设置y轴标签和颜色
+        ax.set_ylabel('库存量', fontsize=10, color=color_theme)
+        ax.tick_params(axis='y', labelcolor=color_theme, labelsize=9)
+        
+        if aligned_price is not None:
+            ax2.set_ylabel('价格', fontsize=10, color='purple')
+            ax2.tick_params(axis='y', labelcolor='purple', labelsize=9)
+        
+        # 设置网格和x轴
+        ax.grid(True, alpha=0.3)
+        ax.tick_params(axis='x', rotation=45, labelsize=8)
+        
+        # 添加趋势箭头
+        if change_rate > 0:
+            ax.annotate('库存↗', xy=(0.02, 0.95), xycoords='axes fraction', 
+                       fontsize=14, color='green', ha='left', va='top', fontweight='bold')
+        else:
+            ax.annotate('库存↘', xy=(0.02, 0.95), xycoords='axes fraction', 
+                       fontsize=14, color='red', ha='left', va='top', fontweight='bold')
+        
+        if aligned_price is not None and price_change_rate > 0:
+            ax2.annotate('价格↗', xy=(0.98, 0.95), xycoords='axes fraction', 
+                        fontsize=14, color='purple', ha='right', va='top', fontweight='bold')
+        elif aligned_price is not None and price_change_rate < 0:
+            ax2.annotate('价格↘', xy=(0.98, 0.95), xycoords='axes fraction', 
+                        fontsize=14, color='purple', ha='right', va='top', fontweight='bold')
+        
+        # 添加图例
+        lines1, labels1 = ax.get_legend_handles_labels()
+        if aligned_price is not None:
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=8)
+        else:
+            ax.legend(lines1, labels1, loc='upper left', fontsize=8)
+    
+    # 隐藏多余的子图
+    for i in range(n_symbols, len(axes)):
+        axes[i].set_visible(False)
+    
+    plt.tight_layout()
+    
+    # 保存图表
+    save_path = f"signal_analysis_{category_name}"
+    os.makedirs(save_path, exist_ok=True)
+    plt.savefig(os.path.join(save_path, f'{category_name}_库存价格对比分析.png'), dpi=300, bbox_inches='tight')
+    plt.close()
 
 def plot_category_analysis(data_dict, symbols, category_name, results_df, color_theme):
     """
-    绘制特定类别品种的综合分析图
+    绘制特定类别品种的综合分析图（保留原有功能）
     """
     if not symbols:
         return
@@ -675,7 +844,78 @@ def generate_analysis_report(results_df, inventory_trends, data_dict):
     with open("analysis_reports/库存分析报告.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(report_lines))
     
-    print("分析报告已保存到 analysis_reports/库存分析报告.txt")
+        print("分析报告已保存到 analysis_reports/库存分析报告.txt")
+
+def get_futures_price_data(symbol: str) -> Optional[pd.DataFrame]:
+    """
+    获取期货价格数据
+    """
+    try:
+        # 将库存数据的symbol转换为价格数据的symbol（添加"主连"）
+        price_symbol = f"{symbol}主连"
+        print(f"正在获取 {price_symbol} 的价格数据...")
+        
+        # 获取期货历史行情数据
+        price_df = ak.futures_hist_em(symbol=price_symbol, period="daily")
+        
+        if price_df is None or price_df.empty:
+            print(f"{price_symbol} 价格数据为空")
+            return None
+            
+        # 数据预处理
+        price_df['时间'] = pd.to_datetime(price_df['时间'])
+        price_df = price_df.rename(columns={'时间': '日期', '收盘': '价格'})
+        
+        # 选择需要的列
+        price_df = price_df[['日期', '价格', '开盘', '最高', '最低', '成交量', '持仓量']].copy()
+        price_df['价格'] = pd.to_numeric(price_df['价格'], errors='coerce')
+        price_df = price_df.dropna(subset=['日期', '价格'])
+        
+        print(f"{price_symbol} 价格数据获取成功，共 {len(price_df)} 条记录")
+        return price_df
+        
+    except Exception as e:
+        print(f"获取 {symbol} 价格数据失败: {str(e)}")
+        return None
+
+def align_inventory_and_price_data(inventory_df: pd.DataFrame, price_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    对齐库存数据和价格数据的时间范围
+    """
+    try:
+        # 确保日期列是datetime类型
+        inventory_df['日期'] = pd.to_datetime(inventory_df['日期'])
+        price_df['日期'] = pd.to_datetime(price_df['日期'])
+        
+        # 找到两个数据集的共同时间范围
+        inventory_start = inventory_df['日期'].min()
+        inventory_end = inventory_df['日期'].max()
+        price_start = price_df['日期'].min()
+        price_end = price_df['日期'].max()
+        
+        # 取交集时间范围
+        common_start = max(inventory_start, price_start)
+        common_end = min(inventory_end, price_end)
+        
+        # 过滤数据到共同时间范围
+        aligned_inventory = inventory_df[
+            (inventory_df['日期'] >= common_start) & 
+            (inventory_df['日期'] <= common_end)
+        ].copy()
+        
+        aligned_price = price_df[
+            (price_df['日期'] >= common_start) & 
+            (price_df['日期'] <= common_end)
+        ].copy()
+        
+        print(f"数据对齐完成，共同时间范围: {common_start.date()} 到 {common_end.date()}")
+        print(f"对齐后库存数据: {len(aligned_inventory)} 条，价格数据: {len(aligned_price)} 条")
+        
+        return aligned_inventory, aligned_price
+        
+    except Exception as e:
+        print(f"数据对齐失败: {str(e)}")
+        return inventory_df, price_df
 
 def main():
     """
@@ -766,11 +1006,13 @@ def main():
         generate_analysis_report(results_df, inventory_trends, data_dict)
         
         print("\n专业分析完成！生成的文件包括：")
-        print("1. 累库品种综合分析图: signal_analysis_累库品种/")
-        print("2. 去库品种综合分析图: signal_analysis_去库品种/")
-        print("3. 分析总览仪表板: analysis_dashboard/库存分析总览仪表板.png")
-        print("4. 详细分析报告: analysis_reports/库存分析报告.txt")
-        print("5. 高级分析图表: inventory_analysis/")
+        print("1. 累库品种库存价格对比分析图: signal_analysis_累库品种/累库品种_库存价格对比分析.png")
+        print("2. 去库品种库存价格对比分析图: signal_analysis_去库品种/去库品种_库存价格对比分析.png")
+        print("3. 累库品种综合分析图: signal_analysis_累库品种/累库品种_综合分析.png")
+        print("4. 去库品种综合分析图: signal_analysis_去库品种/去库品种_综合分析.png")
+        print("5. 分析总览仪表板: analysis_dashboard/库存分析总览仪表板.png")
+        print("6. 详细分析报告: analysis_reports/库存分析报告.txt")
+        print("7. 高级分析图表: inventory_analysis/")
         
     else:
         print("未发现显著的库存变化")
