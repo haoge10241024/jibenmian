@@ -9,6 +9,9 @@ import seaborn as sns
 import traceback
 from typing import Dict, List, Tuple, Optional
 import warnings
+import concurrent.futures
+import time
+from functools import lru_cache
 warnings.filterwarnings('ignore')
 
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
@@ -216,9 +219,43 @@ def get_futures_category(symbol: str) -> str:
             return category
     return '其他'
 
+def get_single_futures_inventory_data(symbol: str) -> Optional[pd.DataFrame]:
+    """
+    获取单个期货品种的库存数据
+    """
+    try:
+        df = ak.futures_inventory_em(symbol=symbol)
+        
+        # 数据验证
+        if df is None or df.empty:
+            return None
+            
+        if '日期' not in df.columns or '库存' not in df.columns:
+            return None
+            
+        # 数据类型转换
+        df['日期'] = pd.to_datetime(df['日期'])
+        df['库存'] = pd.to_numeric(df['库存'], errors='coerce')
+        df = df.dropna(subset=['日期', '库存'])
+        
+        if len(df) < 2:
+            return None
+            
+        df['增减'] = df['库存'].diff()
+        df = df.dropna(subset=['增减'])
+        
+        if len(df) < 2:
+            return None
+            
+        return df
+        
+    except Exception as e:
+        print(f"获取 {symbol} 数据失败: {str(e)}")
+        return None
+
 def get_futures_inventory_data_memory():
     """
-    直接通过接口获取所有期货品种的库存数据，返回字典，不保存文件
+    并行获取所有期货品种的库存数据，返回字典，不保存文件
     """
     futures_symbols = [
         "沪铜", "镍", "锡", "沪铝", "苯乙烯", "液化石油气", "低硫燃料油", "棉纱", 
@@ -230,52 +267,35 @@ def get_futures_inventory_data_memory():
         "乙二醇", "氧化铝", "焦炭", "郑棉", "甲醇", "白糖", "锰硅", "焦煤", 
         "红枣", "螺纹钢", "花生", "苹果", "热卷"
     ]
+    
     data_dict = {}
-    for chinese_name in futures_symbols:
-        try:
-            print(f"正在获取 {chinese_name} 的库存数据...")
-            df = ak.futures_inventory_em(symbol=chinese_name)
+    print(f"开始并行获取 {len(futures_symbols)} 个品种的库存数据...")
+    
+    # 使用线程池并行获取数据
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        # 提交所有任务
+        future_to_symbol = {
+            executor.submit(get_single_futures_inventory_data, symbol): symbol 
+            for symbol in futures_symbols
+        }
+        
+        # 收集结果
+        completed = 0
+        for future in concurrent.futures.as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            completed += 1
             
-            # 数据验证
-            if df is None:
-                print(f"{chinese_name} 数据为空")
-                continue
-                
-            if df.empty:
-                print(f"{chinese_name} 数据为空DataFrame")
-                continue
-                
-            if '日期' not in df.columns or '库存' not in df.columns:
-                print(f"{chinese_name} 数据格式不正确，缺少必要列")
-                continue
-                
-            # 数据类型转换
             try:
-                df['日期'] = pd.to_datetime(df['日期'])
-                df['库存'] = pd.to_numeric(df['库存'], errors='coerce')
-                df = df.dropna(subset=['日期', '库存'])
-                
-                if len(df) < 2:
-                    print(f"{chinese_name} 有效数据量不足")
-                    continue
-                    
-                df['增减'] = df['库存'].diff()
-                df = df.dropna(subset=['增减'])
-                
-                if len(df) < 2:
-                    print(f"{chinese_name} 增减数据量不足")
-                    continue
-                    
-                data_dict[chinese_name] = df
-                print(f"{chinese_name} 数据获取成功，共 {len(df)} 条记录")
+                df = future.result()
+                if df is not None:
+                    data_dict[symbol] = df
+                    print(f"✓ {symbol} 数据获取成功，共 {len(df)} 条记录 ({completed}/{len(futures_symbols)})")
+                else:
+                    print(f"✗ {symbol} 数据获取失败或数据不足 ({completed}/{len(futures_symbols)})")
             except Exception as e:
-                print(f"{chinese_name} 数据处理失败: {str(e)}")
-                continue
-                
-        except Exception as e:
-            print(f"获取 {chinese_name} 数据失败: {str(e)}")
-            continue
-            
+                print(f"✗ {symbol} 处理异常: {str(e)} ({completed}/{len(futures_symbols)})")
+    
+    print(f"数据获取完成！成功获取 {len(data_dict)} 个品种的数据")
     return data_dict
 
 def plot_inventory_trends(df, symbol, save_path="inventory_plots"):
@@ -456,19 +476,29 @@ def plot_signal_analysis(data_dict, inventory_trends, results_df):
     print(f"累库品种数量: {len(inventory_trends['累库品种'])}")
     print(f"去库品种数量: {len(inventory_trends['去库品种'])}")
     
+    # 收集所有需要价格数据的品种
+    all_signal_symbols = inventory_trends['累库品种'] + inventory_trends['去库品种']
+    
+    # 批量获取价格数据
+    if all_signal_symbols:
+        print(f"批量获取 {len(all_signal_symbols)} 个信号品种的价格数据...")
+        price_data_dict = get_multiple_price_data(all_signal_symbols)
+    else:
+        price_data_dict = {}
+    
     # 创建累库品种库存价格对比分析图
     if inventory_trends['累库品种']:
         print(f"正在绘制累库品种分析图，品种: {inventory_trends['累库品种']}")
-        plot_category_analysis_with_price(data_dict, inventory_trends['累库品种'], '累库品种', results_df, 'green')
+        plot_category_analysis_with_price(data_dict, inventory_trends['累库品种'], '累库品种', results_df, 'green', price_data_dict)
         plot_category_analysis(data_dict, inventory_trends['累库品种'], '累库品种', results_df, 'green')
     
     # 创建去库品种库存价格对比分析图
     if inventory_trends['去库品种']:
         print(f"正在绘制去库品种分析图，品种: {inventory_trends['去库品种']}")
-        plot_category_analysis_with_price(data_dict, inventory_trends['去库品种'], '去库品种', results_df, 'red')
+        plot_category_analysis_with_price(data_dict, inventory_trends['去库品种'], '去库品种', results_df, 'red', price_data_dict)
         plot_category_analysis(data_dict, inventory_trends['去库品种'], '去库品种', results_df, 'red')
 
-def plot_category_analysis_with_price(data_dict, symbols, category_name, results_df, color_theme):
+def plot_category_analysis_with_price(data_dict, symbols, category_name, results_df, color_theme, price_data_dict=None):
     """
     绘制特定类别品种的库存与价格对比分析图
     """
@@ -505,8 +535,11 @@ def plot_category_analysis_with_price(data_dict, symbols, category_name, results
             
         inventory_df = data_dict[symbol]
         
-        # 获取价格数据
-        price_df = get_futures_price_data(symbol)
+        # 使用预获取的价格数据或实时获取
+        if price_data_dict and symbol in price_data_dict:
+            price_df = price_data_dict[symbol]
+        else:
+            price_df = get_futures_price_data(symbol)
         
         if price_df is not None:
             # 对齐数据时间范围
@@ -846,20 +879,19 @@ def generate_analysis_report(results_df, inventory_trends, data_dict):
     
         print("分析报告已保存到 analysis_reports/库存分析报告.txt")
 
-def get_futures_price_data(symbol: str) -> Optional[pd.DataFrame]:
+@lru_cache(maxsize=128)
+def get_futures_price_data_cached(symbol: str) -> Optional[pd.DataFrame]:
     """
-    获取期货价格数据
+    获取期货价格数据（带缓存）
     """
     try:
         # 将库存数据的symbol转换为价格数据的symbol（添加"主连"）
         price_symbol = f"{symbol}主连"
-        print(f"正在获取 {price_symbol} 的价格数据...")
         
         # 获取期货历史行情数据
         price_df = ak.futures_hist_em(symbol=price_symbol, period="daily")
         
         if price_df is None or price_df.empty:
-            print(f"{price_symbol} 价格数据为空")
             return None
             
         # 数据预处理
@@ -871,12 +903,55 @@ def get_futures_price_data(symbol: str) -> Optional[pd.DataFrame]:
         price_df['价格'] = pd.to_numeric(price_df['价格'], errors='coerce')
         price_df = price_df.dropna(subset=['日期', '价格'])
         
-        print(f"{price_symbol} 价格数据获取成功，共 {len(price_df)} 条记录")
         return price_df
         
     except Exception as e:
-        print(f"获取 {symbol} 价格数据失败: {str(e)}")
         return None
+
+def get_futures_price_data(symbol: str) -> Optional[pd.DataFrame]:
+    """
+    获取期货价格数据
+    """
+    print(f"正在获取 {symbol}主连 的价格数据...")
+    result = get_futures_price_data_cached(symbol)
+    if result is not None:
+        print(f"{symbol}主连 价格数据获取成功，共 {len(result)} 条记录")
+    else:
+        print(f"{symbol}主连 价格数据获取失败")
+    return result
+
+def get_multiple_price_data(symbols: List[str]) -> Dict[str, pd.DataFrame]:
+    """
+    并行获取多个品种的价格数据
+    """
+    price_data_dict = {}
+    print(f"开始并行获取 {len(symbols)} 个品种的价格数据...")
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        # 提交所有任务
+        future_to_symbol = {
+            executor.submit(get_futures_price_data_cached, symbol): symbol 
+            for symbol in symbols
+        }
+        
+        # 收集结果
+        completed = 0
+        for future in concurrent.futures.as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            completed += 1
+            
+            try:
+                price_df = future.result()
+                if price_df is not None:
+                    price_data_dict[symbol] = price_df
+                    print(f"✓ {symbol}主连 价格数据获取成功 ({completed}/{len(symbols)})")
+                else:
+                    print(f"✗ {symbol}主连 价格数据获取失败 ({completed}/{len(symbols)})")
+            except Exception as e:
+                print(f"✗ {symbol}主连 处理异常: {str(e)} ({completed}/{len(symbols)})")
+    
+    print(f"价格数据获取完成！成功获取 {len(price_data_dict)} 个品种的价格数据")
+    return price_data_dict
 
 def align_inventory_and_price_data(inventory_df: pd.DataFrame, price_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
