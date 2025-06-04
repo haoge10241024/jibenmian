@@ -1,0 +1,23 @@
+[global]
+# 开发模式设置
+developmentMode = false
+
+[server]
+# 服务器设置
+port = 8501
+enableCORS = false
+enableXsrfProtection = false
+maxUploadSize = 200
+headless = true
+
+[browser]
+# 浏览器设置
+gatherUsageStats = false
+
+[theme]
+# 主题设置
+primaryColor = "#FF6B6B"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
+font = "sans serif" 

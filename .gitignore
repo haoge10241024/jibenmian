@@ -1,0 +1,55 @@
+# 缓存文件
+cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 环境变量
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+temp/
+tmp/
+
+# 数据文件（如果有敏感数据）
+*.csv
+*.xlsx
+*.xls
+data/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Python包
+*.egg-info/
+dist/
+build/ 
